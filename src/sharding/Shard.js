@@ -44,7 +44,7 @@ class Shard extends EventEmitter {
 
     /**
      * Arguments for the shard's process executable (only when {@link ShardingManager#mode} is `process`)
-     * @type {?string[]}
+     * @type {string[]}
      */
     this.execArgv = manager.execArgv;
 
@@ -102,11 +102,11 @@ class Shard extends EventEmitter {
   /**
    * Forks a child process or creates a worker thread for the shard.
    * <warn>You should not need to call this manually.</warn>
-   * @param {number} [spawnTimeout=30000] The amount in milliseconds to wait until the {@link Client} has become ready
+   * @param {number} [timeout=30000] The amount in milliseconds to wait until the {@link Client} has become ready
    * before resolving. (-1 or Infinity for no wait)
    * @returns {Promise<ChildProcess>}
    */
-  async spawn(spawnTimeout = 30000) {
+  async spawn(timeout = 30000) {
     if (this.process) throw new Error('SHARDING_PROCESS_EXISTS', this.id);
     if (this.worker) throw new Error('SHARDING_WORKER_EXISTS', this.id);
 
@@ -124,6 +124,9 @@ class Shard extends EventEmitter {
         .on('exit', this._exitListener);
     }
 
+    this._evals.clear();
+    this._fetches.clear();
+
     /**
      * Emitted upon the creation of the shard's child process/worker.
      * @event Shard#spawn
@@ -131,7 +134,7 @@ class Shard extends EventEmitter {
      */
     this.emit('spawn', this.process || this.worker);
 
-    if (spawnTimeout === -1 || spawnTimeout === Infinity) return this.process || this.worker;
+    if (timeout === -1 || timeout === Infinity) return this.process || this.worker;
     await new Promise((resolve, reject) => {
       const cleanup = () => {
         clearTimeout(spawnTimeoutTimer);
@@ -160,7 +163,7 @@ class Shard extends EventEmitter {
         reject(new Error('SHARDING_READY_TIMEOUT', this.id));
       };
 
-      const spawnTimeoutTimer = setTimeout(onTimeout, spawnTimeout);
+      const spawnTimeoutTimer = setTimeout(onTimeout, timeout);
       this.once('ready', onReady);
       this.once('disconnect', onDisconnect);
       this.once('death', onDeath);
@@ -185,15 +188,18 @@ class Shard extends EventEmitter {
 
   /**
    * Kills and restarts the shard's process/worker.
-   * @param {number} [delay=500] How long to wait between killing the process/worker and restarting it (in milliseconds)
-   * @param {number} [spawnTimeout=30000] The amount in milliseconds to wait until the {@link Client} has become ready
+   * @param {Object} [options] Respawn options for the shard
+   * @param {number} [options.delay=500] How long to wait between killing the process/worker and
+   * restarting it (in milliseconds)
+   * @param {number} [options.timeout=30000] The amount in milliseconds to wait until the {@link Client}
+   * has become ready
    * before resolving. (-1 or Infinity for no wait)
    * @returns {Promise<ChildProcess>}
    */
-  async respawn(delay = 500, spawnTimeout) {
+  async respawn({ delay = 500, timeout = 30000 } = {}) {
     this.kill();
     if (delay > 0) await Util.delayFor(delay);
-    return this.spawn(spawnTimeout);
+    return this.spawn(timeout);
   }
 
   /**
@@ -225,6 +231,10 @@ class Shard extends EventEmitter {
    *   .catch(console.error);
    */
   fetchClientValue(prop) {
+    // Shard is dead (maybe respawning), don't cache anything and error immediately
+    if (!this.process && !this.worker) return Promise.reject(new Error('SHARDING_NO_CHILD_EXISTS', this.id));
+
+    // Cached promise from previous call
     if (this._fetches.has(prop)) return this._fetches.get(prop);
 
     const promise = new Promise((resolve, reject) => {
@@ -255,6 +265,10 @@ class Shard extends EventEmitter {
    * @returns {Promise<*>} Result of the script execution
    */
   eval(script) {
+    // Shard is dead (maybe respawning), don't cache anything and error immediately
+    if (!this.process && !this.worker) return Promise.reject(new Error('SHARDING_NO_CHILD_EXISTS', this.id));
+
+    // Cached promise from previous call
     if (this._evals.has(script)) return this._evals.get(script);
 
     const promise = new Promise((resolve, reject) => {
@@ -323,26 +337,28 @@ class Shard extends EventEmitter {
 
       // Shard is requesting a property fetch
       if (message._sFetchProp) {
-        this.manager.fetchClientValues(message._sFetchProp).then(
-          results => this.send({ _sFetchProp: message._sFetchProp, _result: results }),
-          err => this.send({ _sFetchProp: message._sFetchProp, _error: Util.makePlainError(err) }),
+        const resp = { _sFetchProp: message._sFetchProp, _sFetchPropShard: message._sFetchPropShard };
+        this.manager.fetchClientValues(message._sFetchProp, message._sFetchPropShard).then(
+          results => this.send({ ...resp, _result: results }),
+          err => this.send({ ...resp, _error: Util.makePlainError(err) }),
         );
         return;
       }
 
       // Shard is requesting an eval broadcast
       if (message._sEval) {
-        this.manager.broadcastEval(message._sEval).then(
-          results => this.send({ _sEval: message._sEval, _result: results }),
-          err => this.send({ _sEval: message._sEval, _error: Util.makePlainError(err) }),
+        const resp = { _sEval: message._sEval, _sEvalShard: message._sEvalShard };
+        this.manager.broadcastEval(message._sEval, message._sEvalShard).then(
+          results => this.send({ ...resp, _result: results }),
+          err => this.send({ ...resp, _error: Util.makePlainError(err) }),
         );
         return;
       }
 
       // Shard is requesting a respawn of all shards
       if (message._sRespawnAll) {
-        const { shardDelay, respawnDelay, spawnTimeout } = message._sRespawnAll;
-        this.manager.respawnAll(shardDelay, respawnDelay, spawnTimeout).catch(() => {
+        const { shardDelay, respawnDelay, timeout } = message._sRespawnAll;
+        this.manager.respawnAll({ shardDelay, respawnDelay, timeout }).catch(() => {
           // Do nothing
         });
         return;

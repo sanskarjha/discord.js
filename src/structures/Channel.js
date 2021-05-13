@@ -2,17 +2,18 @@
 
 const Base = require('./Base');
 const { ChannelTypes } = require('../util/Constants');
-const Snowflake = require('../util/Snowflake');
+const SnowflakeUtil = require('../util/SnowflakeUtil');
 
 /**
  * Represents any channel on Discord.
  * @extends {Base}
+ * @abstract
  */
 class Channel extends Base {
   constructor(client, data) {
     super(client);
 
-    const type = Object.keys(ChannelTypes)[data.type];
+    const type = ChannelTypes[data.type];
     /**
      * The type of the channel, either:
      * * `dm` - a DM channel
@@ -21,6 +22,7 @@ class Channel extends Base {
      * * `category` - a guild category channel
      * * `news` - a guild news channel
      * * `store` - a guild store channel
+     * * `stage` - a guild stage channel
      * * `unknown` - a generic channel of unknown type, could be Channel or GuildChannel
      * @type {string}
      */
@@ -49,7 +51,7 @@ class Channel extends Base {
    * @readonly
    */
   get createdTimestamp() {
-    return Snowflake.deconstruct(this.id).timestamp;
+    return SnowflakeUtil.deconstruct(this.id).timestamp;
   }
 
   /**
@@ -90,10 +92,19 @@ class Channel extends Base {
 
   /**
    * Fetches this channel.
+   * @param {boolean} [force=false] Whether to skip the cache check and request the API
    * @returns {Promise<Channel>}
    */
-  fetch() {
-    return this.client.channels.fetch(this.id, true);
+  fetch(force = false) {
+    return this.client.channels.fetch(this.id, true, force);
+  }
+
+  /**
+   * Indicates whether this channel is text-based.
+   * @returns {boolean}
+   */
+  isText() {
+    return 'messages' in this;
   }
 
   static create(client, data, guild) {
@@ -134,6 +145,11 @@ class Channel extends Base {
           case ChannelTypes.STORE: {
             const StoreChannel = Structures.get('StoreChannel');
             channel = new StoreChannel(guild, data);
+            break;
+          }
+          case ChannelTypes.STAGE: {
+            const StageChannel = Structures.get('StageChannel');
+            channel = new StageChannel(guild, data);
             break;
           }
         }

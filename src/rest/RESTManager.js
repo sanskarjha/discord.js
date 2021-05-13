@@ -13,11 +13,15 @@ class RESTManager {
     this.handlers = new Collection();
     this.tokenPrefix = tokenPrefix;
     this.versioned = true;
-    this.globalTimeout = null;
+    this.globalLimit = client.options.restGlobalRateLimit > 0 ? client.options.restGlobalRateLimit : Infinity;
+    this.globalRemaining = this.globalLimit;
+    this.globalReset = null;
+    this.globalDelay = null;
     if (client.options.restSweepInterval > 0) {
-      client.setInterval(() => {
+      const interval = client.setInterval(() => {
         this.handlers.sweep(handler => handler._inactive);
       }, client.options.restSweepInterval * 1000);
+      interval.unref();
     }
   }
 
@@ -35,19 +39,6 @@ class RESTManager {
     return Endpoints.CDN(this.client.options.http.cdn);
   }
 
-  push(handler, apiRequest) {
-    return new Promise((resolve, reject) => {
-      handler
-        .push({
-          request: apiRequest,
-          resolve,
-          reject,
-          retries: 0,
-        })
-        .catch(reject);
-    });
-  }
-
   request(method, url, options = {}) {
     const apiRequest = new APIRequest(this, method, url, options);
     let handler = this.handlers.get(apiRequest.route);
@@ -57,7 +48,11 @@ class RESTManager {
       this.handlers.set(apiRequest.route, handler);
     }
 
-    return this.push(handler, apiRequest);
+    return handler.push(apiRequest);
+  }
+
+  get endpoint() {
+    return this.client.options.http.api;
   }
 
   set endpoint(endpoint) {
